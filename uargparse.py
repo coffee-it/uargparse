@@ -3,7 +3,10 @@ Minimal and functional version of CPython's argparse module.
 """
 
 import sys
-from ucollections import namedtuple
+try:
+    from ucollections import namedtuple
+except ImportError:
+    from collections import namedtuple
 
 
 class _ArgError(BaseException):
@@ -11,26 +14,41 @@ class _ArgError(BaseException):
 
 
 class _Arg:
-    def __init__(self, names, dest, action, nargs, const, default, help):
+    def __init__(self, names, dest, metavar, arg_type, action, nargs, const, default, required, choices, help):
         self.names = names
         self.dest = dest
+        self.metavar = metavar
+        self.arg_type = arg_type
         self.action = action
         self.nargs = nargs
         self.const = const
         self.default = default
+        self.required = required
+        self.choices = choices
         self.help = help
 
     def parse(self, optname, args):
-        # parse args for this arg
-        if self.action == "store":
+        # parse args for this Arg
+        def _checked(_arg):
+            if self.choices and _arg not in self.choices:
+                raise _ArgError("value %s must be one of this '%s'" % (_arg, ', '.join(map(str, self.choices))))
+            try:
+                return self.arg_type(_arg)
+            except (TypeError, ValueError, OSError):
+                try:
+                    raise _ArgError('invalid %s value: %s' % (self.arg_type.__name__, _arg))
+                except AttributeError:
+                    raise _ArgError('value %s is not applicable for type of key %s' % (_arg, optname))
+
+        if self.action == "store" or self.action == "append":
             if self.nargs is None:
                 if args:
-                    return args.pop(0)
+                    return _checked(args.pop(0))
                 else:
                     raise _ArgError("expecting value for %s" % optname)
             elif self.nargs == "?":
                 if args:
-                    return args.pop(0)
+                    return _checked(args.pop(0))
                 else:
                     return self.default
             else:
@@ -52,13 +70,18 @@ class _Arg:
                         else:
                             break
                     else:
-                        ret.append(args.pop(0))
+                        ret.append(_checked(args.pop(0)))
                         n -= 1
                 if n > 0:
                     raise _ArgError("expecting value for %s" % optname)
                 return ret
         elif self.action == "store_const":
             return self.const
+        elif self.action == "append":
+            if args:
+                return _checked(args.pop(0))
+            else:
+                raise _ArgError("expecting value for %s" % optname)
         else:
             assert False
 
@@ -73,8 +96,10 @@ def _dest_from_optnames(opt_names):
 
 
 class ArgumentParser:
-    def __init__(self, *, description=""):
+    def __init__(self, *, prog=sys.argv[0], description="", epilog=""):
+        self.prog = prog
         self.description = description
+        self.epilog = epilog
         self.opt = []
         self.pos = []
 
@@ -103,22 +128,33 @@ class ArgumentParser:
                 dest = args[0]
             if not args:
                 args = [dest]
+        arg_type = kwargs.get("type", str)
+        nargs = kwargs.get("nargs", None)
+        metavar = kwargs.get("metavar", None)
+        required = kwargs.get("required", False)
+        choices = kwargs.get("choices", None)
+        help = kwargs.get("help", "")
         list.append(
-            _Arg(args, dest, action, kwargs.get("nargs", None),
-                 const, default, kwargs.get("help", "")))
+            _Arg(args, dest, metavar, arg_type, action, nargs, const, default, required, choices, help))
 
     def usage(self, full):
         # print short usage
-        print("usage: %s [-h]" % sys.argv[0], end="")
+        print("usage: %s [-h, --help]" % self.prog, end="")
 
         def render_arg(arg):
-            if arg.action == "store":
-                if arg.nargs is None:
-                    return " %s" % arg.dest
-                if isinstance(arg.nargs, int):
-                    return " %s(x%d)" % (arg.dest, arg.nargs)
+            if arg.action in ["store", "append"]:
+                if arg.metavar:
+                    arg_for_render = "%s" % arg.metavar.upper()
+                elif arg.choices:
+                    arg_for_render = "[%s]" % ", ".join(arg.choices)
                 else:
-                    return " %s%s" % (arg.dest, arg.nargs)
+                    arg_for_render = arg.dest.upper()
+                if arg.nargs is None:
+                    return " %s" % arg_for_render
+                if isinstance(arg.nargs, int):
+                    return " %s(x%d)" % (arg_for_render, arg.nargs)
+                else:
+                    return " [%s...]" % arg_for_render
             else:
                 return ""
         for opt in self.opt:
@@ -135,13 +171,17 @@ class ArgumentParser:
         if self.description:
             print(self.description)
         if self.pos:
-            print("\npositional args:")
+            print("\nPositional arguments:")
             for pos in self.pos:
-                print("  %-16s%s" % (pos.names[0], pos.help))
-        print("\noptional args:")
-        print("  -h, --help      show this message and exit")
+                print("  %-20s%s" % (pos.names[0], pos.help))
+        print("\nNamed arguments:")
+        print("  -h, --help          show this message and exit")
         for opt in self.opt:
-            print("  %-16s%s" % (', '.join(opt.names) + render_arg(opt), opt.help))
+            # Dont show help with possible values for opt. It's stays in "usage" anyway.
+            # print("  %-20s%s " % (', '.join(opt.names) + render_arg(opt).upper(), opt.help))
+            print("  %-20s%s" % (', '.join(opt.names), opt.help))
+
+        print("\n", self.epilog)
 
     def parse_args(self, args=None):
         return self._parse_args_impl(args, False)
@@ -162,7 +202,7 @@ class ArgumentParser:
             sys.exit(2)
 
     def _parse_args(self, args, return_unknown):
-        # add optional args with defaults
+        # add optional(named) args with defaults
         arg_dest = []
         arg_vals = []
         for opt in self.opt:
@@ -179,7 +219,7 @@ class ArgumentParser:
         parsed_pos = False
         while args or not parsed_pos:
             if args and args[0].startswith("-") and args[0] != "-" and args[0] != "--":
-                # optional arg
+            # optional(named) arguments
                 a = args.pop(0)
                 if a in ("-h", "--help"):
                     self.usage(True)
@@ -187,9 +227,15 @@ class ArgumentParser:
                 found = False
                 for i, opt in enumerate(self.opt):
                     if a in opt.names:
-                        arg_vals[i] = opt.parse(a, args)
-                        found = True
-                        break
+                        if opt.action == "append":
+                            if type(arg_vals[i]) is type(None):
+                                arg_vals[i] = []
+                            arg_vals[i].append(opt.parse(a, args))
+                            found = True
+                        else:
+                            arg_vals[i] = opt.parse(a, args)
+                            found = True
+                            break
                 if not found:
                     if return_unknown:
                         unknown.append(a)
@@ -197,7 +243,7 @@ class ArgumentParser:
                     else:
                         raise _ArgError("unknown option %s" % a)
             else:
-                # positional arg
+            # positional arguments
                 if parsed_pos:
                     if return_unknown:
                         unknown = unknown + args
@@ -211,6 +257,10 @@ class ArgumentParser:
                 if return_unknown:
                     consume_unknown()
 
-        # build and return named tuple with arg values
+        # checks the required arguments
+        required_but_not_used = ([arg.dest for i, arg in enumerate(self.opt) if arg.required == True and arg_vals[i] == None])
+        if required_but_not_used:
+            raise _ArgError("option(s) '%s' is(are) required" % ", ".join(required_but_not_used))
+
         values = namedtuple("args", arg_dest)(*arg_vals)
         return (values, unknown) if return_unknown else values
