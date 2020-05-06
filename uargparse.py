@@ -85,6 +85,39 @@ class _Arg:
         else:
             assert False
 
+class FileType:
+    def __init__(self, mode='r', bufsize=-1, encoding=None, errors=None):
+        self._mode = mode
+        self._bufsize = bufsize
+        self._encoding = encoding
+        self._errors = errors
+
+    def __call__(self, string):
+        # the special argument "-" means sys.std{in,out}
+        if string == '-':
+            if 'r' in self._mode:
+                return sys.stdin
+            elif 'w' in self._mode:
+                return sys.stdout
+            else:
+                msg = 'argument "-" with mode %r' % self._mode
+                raise _ArgError(msg)
+
+        # all other arguments are used as file names
+        try:
+            # return open(string, self._mode, self._bufsize, self._encoding,self._errors) # incompatible with micropython
+            return open(string, self._mode)
+        except OSError as e:
+            message = "can't open '%s': %s"
+            raise _ArgError(message % (string, e))
+
+    def __repr__(self):
+        args = self._mode, self._bufsize
+        kwargs = [('encoding', self._encoding), ('errors', self._errors)]
+        args_str = ', '.join([repr(arg) for arg in args if arg != -1] +
+                             ['%s=%r' % (kw, arg) for kw, arg in kwargs
+                              if arg is not None])
+        return '%s(%s)' % (type(self).__name__, args_str)
 
 def _dest_from_optnames(opt_names):
     dest = opt_names[0]
@@ -94,10 +127,9 @@ def _dest_from_optnames(opt_names):
             break
     return dest.lstrip("-").replace("-", "_")
 
-
 class ArgumentParser:
-    def __init__(self, *, prog=sys.argv[0], description="", epilog=""):
-        self.prog = prog
+    def __init__(self, *, prog=None, description="", epilog=""):
+        self.prog = sys.argv[0] if (sys.argv and not prog) else prog
         self.description = description
         self.epilog = epilog
         self.opt = []
